@@ -6,7 +6,7 @@
 #include <NewPing.h>
 #include <SimpleKalmanFilter.h>
 
-// Arduino PINS (NEED to Change) all are DIGITAL INPUTS/OUTPUTS
+// Pin out - Updated for ESP32
 #define LED 2
 #define FLOW_PIN 21             // GPIO 21
 #define OVERFLOW_VALVE_PIN 23   // GPIO 23
@@ -84,21 +84,10 @@ int percentWaterLevel()
 
 void setup()
 {
+  // Serial Communication Setup
   Serial.begin(115200);
 
-  // Wifi Setup
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(1000);
-    Serial.println("Connecting to WiFi..");
-  }
-  Serial.println(WiFi.localIP());
-  server.begin();
-
-  waterHeightChart.updateX(XAxis, 11);
-
-  // Pins Setup (Need to check)
+  // Pins Setup
   pinMode(FLOW_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(FLOW_PIN), flowISR, RISING);
   pinMode(SANITATION_VALVE_PIN, OUTPUT);
@@ -119,6 +108,18 @@ void setup()
   digitalWrite(LED, LOW);
   // digitalWrite(UVLED_PIN, HIGH);
 
+  // Wifi Setup
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(1000);
+    Serial.println("Connecting to WiFi..");
+  }
+  Serial.println(WiFi.localIP());
+  server.begin();
+
+  waterHeightChart.updateX(XAxis, 11);
+
   uS = sonar.ping_median(5);         // Send ping, get ping time in microseconds (uS).
   waterLevel = sonar.convert_cm(uS); // Convert ping time to distance and print result (0 = outside set distance range, no ping echo)
   avgWaterLevel = kalmanFilter.updateEstimate(waterLevel);
@@ -138,15 +139,13 @@ void loop()
       prevLevelCheckTime = millis();
     }
     Serial.print("Water level: ");
-    Serial.println(avgWaterLevel);
-    Serial.print("Prev Level: ");
+    Serial.print(avgWaterLevel);
+    Serial.print(", Prev Level: ");
     Serial.println(prevLevel);
-    Serial.println(isRising);
-    Serial.println(isOverflowing);
-    Serial.println(isSanitizing);
     levelCheckTime = millis();
   }
 
+  // Is control forced by dashboard?
   if (isForced == true)
   {
     isOverflowing = false;
@@ -157,9 +156,9 @@ void loop()
     dashboard.sendUpdates();
   }
 
+  // Update Dashboard
   if ((millis() - dashboardUpdateTime) > 1 * 60 * 1000)
   {
-    // Update Dashboard
     // Insert the newest avgWaterLevel into the front of the array and shift the old values back
     percentFull = percentWaterLevel();
     for (int i = 10; i > 0; i--)
@@ -173,6 +172,7 @@ void loop()
     dashboardUpdateTime = millis();
   }
 
+  // Idle Mode
   if (avgWaterLevel < levelMin && avgWaterLevel > levelMax && !isFlushing && !isSanitizing && !isOverflowing && !isForced)
   {
     // Serial.println("Waiting Mode");
@@ -190,7 +190,7 @@ void loop()
   if (isCurrentlyRising != isRising && !isRising && millis() > 5000 && !isForced) //&& (millis() - flushIntervalTime) > flushInterval)
   {
     // Water level has changed direction
-    Serial.println("Flush beginning, opening overflow valve for 30 minutes");
+    Serial.println("Flush beginning, opening overflow valve");
     isRising = isCurrentlyRising;
     isFlushing = true;
     digitalWrite(OVERFLOW_VALVE_PIN, LOW);
@@ -214,7 +214,7 @@ void loop()
       dashboard.sendUpdates();
     }
   }
-  else if (avgWaterLevel > levelMin && isOverflowing && !isForced)
+  else if (avgWaterLevel > levelMid && isOverflowing && !isForced)
   {
     Serial.println("Overflow valve closed");
     isOverflowing = false;
