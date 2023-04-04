@@ -8,15 +8,15 @@
 
 // Arduino PINS (NEED to Change) all are DIGITAL INPUTS/OUTPUTS
 #define LED 2
-#define FLOW_PIN 14
-#define OVERFLOW_VALVE_PIN 3
-#define SANITATION_VALVE_PIN 4
+#define FLOW_PIN 21             // GPIO 21
+#define OVERFLOW_VALVE_PIN 23   // GPIO 23
+#define SANITATION_VALVE_PIN 22 // GPIO 22
 // #define UVLED_PIN 5
-#define PUMP_PWM 22
-#define IN1 12
-#define IN2 13
-#define TRIGGER_PIN 33
-#define ECHO_PIN 32
+#define PUMP_PWM 19    // GPIO 19
+#define IN1 18         // GPIO 18
+#define IN2 5          // GPIO 5
+#define TRIGGER_PIN 17 // GPIO 17
+#define ECHO_PIN 16    // GPIO 16
 
 // Constants
 #define minFlowRate 0.2 // L/min
@@ -26,10 +26,11 @@
 
 // Variables
 int speed = 0;
-float waterLevel;
-float avgWaterLevel;
-float prevLevel;
-int percentFull;
+float waterLevel = 0;
+float avgWaterLevel = 0;
+float prevLevel = 0;
+int percentFull = 0;
+bool isForced = false;
 bool isOverflowing = false;
 bool isSanitizing = false;
 bool isRising = false;
@@ -46,7 +47,7 @@ unsigned int uS;
 volatile int flowCount = 0;
 
 // Wifi Credentials
-const char *ssid = "Wilkinson";
+const char *ssid = "BTW - Pro Max 13";
 const char *password = "14881488";
 
 // Dashboard and Server Setup
@@ -95,6 +96,8 @@ void setup()
   Serial.println(WiFi.localIP());
   server.begin();
 
+  waterHeightChart.updateX(XAxis, 11);
+
   // Pins Setup (Need to check)
   pinMode(FLOW_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(FLOW_PIN), flowISR, RISING);
@@ -109,7 +112,7 @@ void setup()
   pinMode(LED, OUTPUT);
 
   // Initial Pin State
-  digitalWrite(IN1, HIGH);
+  digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
   digitalWrite(SANITATION_VALVE_PIN, HIGH);
   digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
@@ -118,22 +121,16 @@ void setup()
 
   uS = sonar.ping_median(5);         // Send ping, get ping time in microseconds (uS).
   waterLevel = sonar.convert_cm(uS); // Convert ping time to distance and print result (0 = outside set distance range, no ping echo)
-  waterLevel = random(5, 40);
   avgWaterLevel = kalmanFilter.updateEstimate(waterLevel);
   prevLevel = avgWaterLevel;
-
-  waterHeightChart.updateX(XAxis, 11);
 }
 
 void loop()
 {
-  int water = random(5, 40);
-
   if ((millis() - levelCheckTime) > 1000)
   {
     uS = sonar.ping_median(5);         // Send ping, get ping time in microseconds (uS).
     waterLevel = sonar.convert_cm(uS); // Convert ping time to distance and print result (0 = outside set distance range, no ping echo)
-    waterLevel = random(5, 40);
     avgWaterLevel = kalmanFilter.updateEstimate(waterLevel);
     if (millis() - prevLevelCheckTime > 0.5 * 60 * 1000)
     {
@@ -148,6 +145,16 @@ void loop()
     Serial.println(isOverflowing);
     Serial.println(isSanitizing);
     levelCheckTime = millis();
+  }
+
+  if (isForced == true)
+  {
+    isOverflowing = false;
+    isSanitizing = false;
+    isRising = false;
+    isFlushing = false;
+    systemStatus.update("Forced Control", "danger");
+    dashboard.sendUpdates();
   }
 
   if ((millis() - dashboardUpdateTime) > 1 * 60 * 1000)
@@ -166,7 +173,7 @@ void loop()
     dashboardUpdateTime = millis();
   }
 
-  if (avgWaterLevel < levelMin && avgWaterLevel > levelMax && !isFlushing && !isSanitizing && !isOverflowing)
+  if (avgWaterLevel < levelMin && avgWaterLevel > levelMax && !isFlushing && !isSanitizing && !isOverflowing && !isForced)
   {
     // Serial.println("Waiting Mode");
     digitalWrite(SANITATION_VALVE_PIN, HIGH);
@@ -180,7 +187,7 @@ void loop()
 
   // Check if water level is rising or falling
   bool isCurrentlyRising = avgWaterLevel < prevLevel;
-  if (isCurrentlyRising != isRising && !isRising && millis() > 5000) //&& (millis() - flushIntervalTime) > flushInterval)
+  if (isCurrentlyRising != isRising && !isRising && millis() > 5000 && !isForced) //&& (millis() - flushIntervalTime) > flushInterval)
   {
     // Water level has changed direction
     Serial.println("Flush beginning, opening overflow valve for 30 minutes");
@@ -194,7 +201,7 @@ void loop()
   }
 
   // Check if overflow valve needs to be opened
-  if (avgWaterLevel < levelMax && !isSanitizing && millis() > 5000)
+  if (avgWaterLevel < levelMax && !isSanitizing && millis() > 5000 && !isForced)
   {
     if (!isOverflowing)
     {
@@ -207,7 +214,7 @@ void loop()
       dashboard.sendUpdates();
     }
   }
-  else if (avgWaterLevel > levelMin && isOverflowing)
+  else if (avgWaterLevel > levelMin && isOverflowing && !isForced)
   {
     Serial.println("Overflow valve closed");
     isOverflowing = false;
@@ -216,7 +223,7 @@ void loop()
   }
 
   // Check if sanitation valve needs to be opened
-  if ((millis() - flushStartTime) > flushDuration && isFlushing)
+  if ((millis() - flushStartTime) > flushDuration && isFlushing && !isForced)
   {
     if (!isSanitizing)
     {
@@ -254,7 +261,7 @@ void loop()
     }
   }
   // Check flow rate
-  if (millis() - lastFlowCheckTime >= 1000 && isSanitizing)
+  if (millis() - lastFlowCheckTime >= 1000 && isSanitizing && !isForced)
   {
     lastFlowCheckTime = millis();
     float flowRate = (((float)flowCount) / 23);
@@ -289,13 +296,17 @@ void loop()
       digitalWrite(IN2, LOW);
       delay(10);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
-    } else {
+      isForced = false;
+    }
+    else
+    {
       digitalWrite(SANITATION_VALVE_PIN, LOW);
+      digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
       delay(10);
-      Serial.println("PUMP ON");
       digitalWrite(IN1, HIGH);
       digitalWrite(IN2, LOW);
       analogWrite(PUMP_PWM, speed);
+      isForced = true;
     }
     sanitize.update(sanitizeValue); });
   dashboard.sendUpdates();
@@ -310,13 +321,17 @@ void loop()
       digitalWrite(IN2, LOW);
       delay(10);
       digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
-    } else {
+      isForced = false;
+    }
+    else
+    {
       digitalWrite(OVERFLOW_VALVE_PIN, LOW);
+      digitalWrite(SANITATION_VALVE_PIN, HIGH);
       delay(10);
-      Serial.println("PUMP ON");
       digitalWrite(IN1, HIGH);
       digitalWrite(IN2, LOW);
       analogWrite(PUMP_PWM, speed);
+      isForced = true;
     }
     overflow.update(overflowValue); });
   dashboard.sendUpdates();
