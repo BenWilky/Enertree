@@ -11,7 +11,7 @@
 #define FLOW_PIN 21             // GPIO 21
 #define OVERFLOW_VALVE_PIN 23   // GPIO 23
 #define SANITATION_VALVE_PIN 22 // GPIO 22
-// #define UVLED_PIN 5
+// #define UVLED_PIN 4 //GPIO 4
 #define PUMP_PWM 19    // GPIO 19
 #define IN1 18         // GPIO 18
 #define IN2 5          // GPIO 5
@@ -22,14 +22,15 @@
 #define minFlowRate 0.2 // L/min
 #define levelMax 5
 #define levelMid 15
-#define levelMin 30 // 30 is best
+#define levelMin 35 // 30 is best
 
 // Variables
 int speed = 0;
 float waterLevel = 0;
 float avgWaterLevel = 0;
 float prevLevel = 0;
-int percentFull = 0;
+int percentFullSanitized = 0;
+int percentFullRaw = 0;
 bool isForced = false;
 bool isOverflowing = false;
 bool isSanitizing = false;
@@ -61,7 +62,7 @@ Card overflow(&dashboard, BUTTON_CARD, "Force Overflow");
 Card sanitize(&dashboard, BUTTON_CARD, "Force Sanitize");
 Card pumpSpeed(&dashboard, SLIDER_CARD, "Pump Speed", "", 0, 255);
 Card systemStatus(&dashboard, STATUS_CARD, "System Status", "idle");
-Chart waterHeightChart(&dashboard, BAR_CHART, "Water Height Chart - Tank 1");
+Chart waterHeightChart(&dashboard, BAR_CHART, "Raw Water Tank %");
 
 String XAxis[] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 int YAxis[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -77,9 +78,9 @@ void flowISR()
   flowCount++;
 }
 
-int percentWaterLevel()
+int percentWaterLevel(float level)
 {
-  return ((avgWaterLevel - levelMax) / (levelMin - levelMax) * 100);
+  return ((level - levelMin) / (levelMin - levelMax) * 100);
 }
 
 void setup()
@@ -160,13 +161,13 @@ void loop()
   if ((millis() - dashboardUpdateTime) > 1 * 60 * 1000)
   {
     // Insert the newest avgWaterLevel into the front of the array and shift the old values back
-    percentFull = percentWaterLevel();
+    percentFullRaw = percentWaterLevel(avgWaterLevel);
     for (int i = 10; i > 0; i--)
     {
       YAxis[i] = YAxis[i - 1];
     }
-    YAxis[0] = percentFull;
-    waterHeigth1.update(percentFull);
+    YAxis[0] = percentFullRaw;
+    waterHeigth1.update(percentFullRaw);
     waterHeightChart.updateY(YAxis, 11);
     dashboard.sendUpdates();
     dashboardUpdateTime = millis();
@@ -193,7 +194,12 @@ void loop()
     Serial.println("Flush beginning, opening overflow valve");
     isRising = isCurrentlyRising;
     isFlushing = true;
+    digitalWrite(SANITATION_VALVE_PIN, HIGH);
     digitalWrite(OVERFLOW_VALVE_PIN, LOW);
+    delay(10);
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(PUMP_PWM, speed);
     flushStartTime = millis();
     flushIntervalTime = millis();
     systemStatus.update("Flushing", "warning");
@@ -207,8 +213,12 @@ void loop()
     {
       Serial.println("Overflow valve opened");
       isOverflowing = true;
+      digitalWrite(SANITATION_VALVE_PIN, HIGH);
       digitalWrite(OVERFLOW_VALVE_PIN, LOW);
       delay(10);
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+      analogWrite(PUMP_PWM, speed);
       isRising = false;
       systemStatus.update("Overflow", "danger");
       dashboard.sendUpdates();
@@ -218,6 +228,8 @@ void loop()
   {
     Serial.println("Overflow valve closed");
     isOverflowing = false;
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
     delay(10);
     digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
   }
@@ -279,8 +291,9 @@ void loop()
       isOverflowing = false;
       digitalWrite(IN1, LOW);
       digitalWrite(IN2, LOW);
-      delay(100);
+      delay(10);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
+      delay(10);
       // digitalWrite(UVLED_PIN, HIGH);
     }
     flowCount = 0;
@@ -291,15 +304,17 @@ void loop()
                           {
     if (sanitizeValue == 0)
     {
-      Serial.println("PUMP OFF");
       digitalWrite(IN1, LOW);
       digitalWrite(IN2, LOW);
       delay(10);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
+      digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
       isForced = false;
     }
     else
     {
+      // digitalWrite(UVLED_PIN, LOW);
+      // delay(10);
       digitalWrite(SANITATION_VALVE_PIN, LOW);
       digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
       delay(10);
@@ -316,10 +331,10 @@ void loop()
                           {
     if (overflowValue == 0)
     {
-      Serial.println("PUMP OFF");
       digitalWrite(IN1, LOW);
       digitalWrite(IN2, LOW);
       delay(10);
+      digitalWrite(SANITATION_VALVE_PIN, HIGH);
       digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
       isForced = false;
     }
