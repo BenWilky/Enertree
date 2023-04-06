@@ -46,6 +46,10 @@ unsigned long prevLevelCheckTime = 0;
 unsigned long dashboardUpdateTime = 0;
 unsigned int uS;
 volatile int flowCount = 0;
+float calibrationFactor = 36; // Flow rate sensor calibration factor
+float flowRate = 0;
+float flowLitres = 0;
+float totalLitres = 0;
 
 // Wifi Credentials
 const char *ssid = "BTW - Pro Max 13";
@@ -60,6 +64,7 @@ Card waterHeigth1(&dashboard, GENERIC_CARD, "Raw Water Tank", "%");
 Card waterHeigth2(&dashboard, GENERIC_CARD, "Sanitized Water Tank", "%");
 Card overflow(&dashboard, BUTTON_CARD, "Force Overflow");
 Card sanitize(&dashboard, BUTTON_CARD, "Force Sanitize");
+Card flow(&dashboard, GENERIC_CARD, "Flow Rate", "L/min");
 Card pumpSpeed(&dashboard, SLIDER_CARD, "Pump Speed", "", 0, 255);
 Card systemStatus(&dashboard, STATUS_CARD, "System Status", "idle");
 Chart waterHeightChart(&dashboard, BAR_CHART, "Raw Water Tank %");
@@ -90,7 +95,7 @@ void setup()
 
   // Pins Setup
   pinMode(FLOW_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(FLOW_PIN), flowISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(FLOW_PIN), flowISR, FALLING);
   pinMode(SANITATION_VALVE_PIN, OUTPUT);
   pinMode(OVERFLOW_VALVE_PIN, OUTPUT);
   // pinMode(UVLED_PIN, OUTPUT);
@@ -273,13 +278,19 @@ void loop()
     }
   }
   // Check flow rate
-  if (millis() - lastFlowCheckTime >= 1000 && isSanitizing && !isForced)
+  if (millis() - lastFlowCheckTime > 1000 && isSanitizing && !isForced)
   {
+    flowRate = ((1000 / (millis() - lastFlowCheckTime)) * flowCount) / calibrationFactor;
+    flowCount = 0;
     lastFlowCheckTime = millis();
-    float flowRate = (((float)flowCount) / 23);
+    flow.update(flowRate);
     Serial.print("Flow rate: ");
     Serial.print(flowRate);
     Serial.println(" L/min");
+    flowLitres = flowRate / 60;
+    totalLitres += flowLitres;
+    Serial.print("Total litres: ");
+    Serial.println(totalLitres);
     if (flowRate < minFlowRate && isSanitizing)
     {
       Serial.println("Flow rate too low, closing sanitation valve and turning off pump and UV LED");
@@ -295,8 +306,8 @@ void loop()
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
       delay(10);
       // digitalWrite(UVLED_PIN, HIGH);
+      delay(1000);
     }
-    flowCount = 0;
   }
 
   // Force Sanitize
