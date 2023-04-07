@@ -11,15 +11,15 @@
 #define FLOW_PIN 21             // GPIO 21
 #define OVERFLOW_VALVE_PIN 23   // GPIO 23
 #define SANITATION_VALVE_PIN 22 // GPIO 22
-// #define UVLED_PIN 4 //GPIO 4
-#define PUMP_PWM 19    // GPIO 19
-#define IN1 18         // GPIO 18
-#define IN2 5          // GPIO 5
-#define TRIGGER_PIN 17 // GPIO 17
-#define ECHO_PIN 16    // GPIO 16
+#define UVLED_PIN 4             // GPIO 4
+#define PUMP_PWM 19             // GPIO 19
+#define IN1 18                  // GPIO 18
+#define IN2 5                   // GPIO 5
+#define TRIGGER_PIN 17          // GPIO 17
+#define ECHO_PIN 16             // GPIO 16
 
 // Constants
-#define minFlowRate 0.2 // L/min
+#define minFlowRate 1.9 // L/min
 #define levelMax 5
 #define levelMid 15
 #define levelMin 35 // 30 is best
@@ -28,7 +28,7 @@
 int speed = 0;
 float waterLevel = 0;
 float avgWaterLevel = 0;
-float prevLevel = 0;
+int prevLevel = 0;
 int percentFullSanitized = 0;
 int percentFullRaw = 0;
 bool isForced = false;
@@ -36,6 +36,7 @@ bool isOverflowing = false;
 bool isSanitizing = false;
 bool isRising = false;
 bool isFlushing = false;
+bool forceSanitize = false;
 unsigned long flushInterval = 5 * 60 * 1000; // 60 * 1000; // 5 hours
 unsigned long flushDuration = 30 * 1000;     //* 60 * 1000;     // 30 minutes
 unsigned long flushStartTime = 0;
@@ -85,7 +86,7 @@ void flowISR()
 
 int percentWaterLevel(float level)
 {
-  return ((level - levelMin) / (levelMin - levelMax) * 100);
+  return ((levelMin - level) / (levelMin - levelMax) * 100);
 }
 
 void setup()
@@ -98,7 +99,7 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(FLOW_PIN), flowISR, FALLING);
   pinMode(SANITATION_VALVE_PIN, OUTPUT);
   pinMode(OVERFLOW_VALVE_PIN, OUTPUT);
-  // pinMode(UVLED_PIN, OUTPUT);
+  pinMode(UVLED_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   pinMode(TRIGGER_PIN, OUTPUT);
   pinMode(PUMP_PWM, OUTPUT);
@@ -112,7 +113,7 @@ void setup()
   digitalWrite(SANITATION_VALVE_PIN, HIGH);
   digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
   digitalWrite(LED, LOW);
-  // digitalWrite(UVLED_PIN, HIGH);
+  digitalWrite(UVLED_PIN, HIGH);
 
   // Wifi Setup
   WiFi.begin(ssid, password);
@@ -160,6 +161,20 @@ void loop()
     isFlushing = false;
     systemStatus.update("Forced Control", "danger");
     dashboard.sendUpdates();
+    if (millis() - lastFlowCheckTime > 1000 && forceSanitize)
+    {
+      flowRate = ((1000 / (millis() - lastFlowCheckTime)) * flowCount) / calibrationFactor;
+      flowCount = 0;
+      lastFlowCheckTime = millis();
+      flow.update(flowRate);
+      Serial.print("Flow rate: ");
+      Serial.print(flowRate);
+      Serial.println(" L/min");
+      flowLitres = flowRate / 60;
+      totalLitres += flowLitres;
+      Serial.print("Total litres: ");
+      Serial.println(totalLitres);
+    }
   }
 
   // Update Dashboard
@@ -184,7 +199,7 @@ void loop()
     // Serial.println("Waiting Mode");
     digitalWrite(SANITATION_VALVE_PIN, HIGH);
     digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
-    // digitalWrite(UVLED_PIN, HIGH);
+    digitalWrite(UVLED_PIN, HIGH);
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
     systemStatus.update("Idle", "idle");
@@ -305,7 +320,7 @@ void loop()
       delay(10);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
       delay(10);
-      // digitalWrite(UVLED_PIN, HIGH);
+      digitalWrite(UVLED_PIN, HIGH);
       delay(1000);
     }
   }
@@ -320,12 +335,15 @@ void loop()
       delay(10);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
       digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
+      delay(10);
+      digitalWrite(UVLED_PIN, HIGH);
       isForced = false;
+      forceSanitize = false;
     }
     else
     {
-      // digitalWrite(UVLED_PIN, LOW);
-      // delay(10);
+      digitalWrite(UVLED_PIN, LOW);
+      delay(10);
       digitalWrite(SANITATION_VALVE_PIN, LOW);
       digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
       delay(10);
@@ -333,6 +351,7 @@ void loop()
       digitalWrite(IN2, LOW);
       analogWrite(PUMP_PWM, speed);
       isForced = true;
+      forceSanitize = true;
     }
     sanitize.update(sanitizeValue); });
   dashboard.sendUpdates();
