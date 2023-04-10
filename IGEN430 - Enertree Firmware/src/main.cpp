@@ -5,27 +5,29 @@
 #include <ESPDash.h>
 #include <NewPing.h>
 #include <SimpleKalmanFilter.h>
+#include <Smoothed.h>
 
 // Pin out - Updated for ESP32
 #define LED 2
 #define FLOW_PIN 21             // GPIO 21
 #define OVERFLOW_VALVE_PIN 23   // GPIO 23
 #define SANITATION_VALVE_PIN 22 // GPIO 22
-#define UVLED_PIN 4             // GPIO 4
+#define UVLED_PIN 16            // GPIO 4
 #define PUMP_PWM 19             // GPIO 19
 #define IN1 18                  // GPIO 18
 #define IN2 5                   // GPIO 5
-#define TRIGGER_PIN 17          // GPIO 17
-#define ECHO_PIN 16             // GPIO 16
+#define TRIGGER_PIN 4           // GPIO 17
+#define ECHO_PIN 15             // GPIO 16
 
 // Constants
 #define minFlowRate 1.9 // L/min
 #define levelMax 5
 #define levelMid 15
-#define levelMin 35 // 30 is best
+#define levelMin 30 // 30 is best
 
 // Variables
 int speed = 0;
+int flag = 0;
 float waterLevel = 0;
 float avgWaterLevel = 0;
 int prevLevel = 0;
@@ -43,11 +45,13 @@ unsigned long flushStartTime = 0;
 unsigned long lastFlowCheckTime = 0;
 unsigned long levelCheckTime = 0;
 unsigned long flushIntervalTime = 0;
+unsigned long flushTimer = 0;
 unsigned long prevLevelCheckTime = 0;
 unsigned long dashboardUpdateTime = 0;
 unsigned int uS;
-volatile int flowCount = 0;
-float calibrationFactor = 36; // Flow rate sensor calibration factor
+volatile byte flowCount = 0;
+byte flowCount1sec = 0;
+float calibrationFactor = 13; // Flow rate sensor calibration factor
 float flowRate = 0;
 float flowLitres = 0;
 float totalLitres = 0;
@@ -62,12 +66,14 @@ ESPDash dashboard(&server);
 
 // Dashboard Cards
 Card waterHeigth1(&dashboard, GENERIC_CARD, "Raw Water Tank", "%");
-Card waterHeigth2(&dashboard, GENERIC_CARD, "Sanitized Water Tank", "%");
+Card volume(&dashboard, GENERIC_CARD, "Sanitized Water", "L");
+Card flow(&dashboard, GENERIC_CARD, "Flow Rate", "L/min");
+Card systemStatus(&dashboard, STATUS_CARD, "System Status", "idle");
 Card overflow(&dashboard, BUTTON_CARD, "Force Overflow");
 Card sanitize(&dashboard, BUTTON_CARD, "Force Sanitize");
-Card flow(&dashboard, GENERIC_CARD, "Flow Rate", "L/min");
+Card reset(&dashboard, BUTTON_CARD, "Reset Water Level");
 Card pumpSpeed(&dashboard, SLIDER_CARD, "Pump Speed", "", 0, 255);
-Card systemStatus(&dashboard, STATUS_CARD, "System Status", "idle");
+Card calibration(&dashboard, SLIDER_CARD, "Flow Calibration", "", 0, 36);
 Chart waterHeightChart(&dashboard, BAR_CHART, "Raw Water Tank %");
 
 String XAxis[] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
@@ -76,10 +82,10 @@ int YAxis[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 // Ultrasonic Sensor
 NewPing sonar(TRIGGER_PIN, ECHO_PIN, 200);
 
-// Kalmann Filter
-SimpleKalmanFilter kalmanFilter(1, 1, 0.01);
+// Smoothing Value
+Smoothed<float> smooth;
 
-void flowISR()
+void IRAM_ATTR flowISR()
 {
   flowCount++;
 }
@@ -127,10 +133,16 @@ void setup()
 
   waterHeightChart.updateX(XAxis, 11);
 
-  uS = sonar.ping_median(5);         // Send ping, get ping time in microseconds (uS).
-  waterLevel = sonar.convert_cm(uS); // Convert ping time to distance and print result (0 = outside set distance range, no ping echo)
-  avgWaterLevel = kalmanFilter.updateEstimate(waterLevel);
-  prevLevel = avgWaterLevel;
+  smooth.begin(SMOOTHED_AVERAGE, 10);
+
+  for (int k = 0; k <= 5; k++)
+  {
+    uS = sonar.ping_median(5);         // Send ping, get ping time in microseconds (uS).
+    waterLevel = sonar.convert_cm(uS); // Convert ping time to distance and print result (0 = outside set distance range, no ping echo)
+    smooth.add(waterLevel);
+    avgWaterLevel = smooth.get();
+    prevLevel = avgWaterLevel;
+  }
 }
 
 void loop()
@@ -139,8 +151,9 @@ void loop()
   {
     uS = sonar.ping_median(5);         // Send ping, get ping time in microseconds (uS).
     waterLevel = sonar.convert_cm(uS); // Convert ping time to distance and print result (0 = outside set distance range, no ping echo)
-    avgWaterLevel = kalmanFilter.updateEstimate(waterLevel);
-    if (millis() - prevLevelCheckTime > 0.5 * 60 * 1000)
+    smooth.add(waterLevel);
+    avgWaterLevel = smooth.get();
+    if (millis() - prevLevelCheckTime > 5 * 60 * 1000)
     {
       prevLevel = avgWaterLevel;
       prevLevelCheckTime = millis();
@@ -161,12 +174,12 @@ void loop()
     isFlushing = false;
     systemStatus.update("Forced Control", "danger");
     dashboard.sendUpdates();
-    if (millis() - lastFlowCheckTime > 1000 && forceSanitize)
+    if (millis() - lastFlowCheckTime > 1000 && forceSanitize == true)
     {
-      flowRate = ((1000 / (millis() - lastFlowCheckTime)) * flowCount) / calibrationFactor;
+      flowCount1sec = flowCount;
       flowCount = 0;
+      flowRate = ((1000.0 / (millis() - lastFlowCheckTime)) * flowCount1sec) / calibrationFactor;
       lastFlowCheckTime = millis();
-      flow.update(flowRate);
       Serial.print("Flow rate: ");
       Serial.print(flowRate);
       Serial.println(" L/min");
@@ -174,6 +187,9 @@ void loop()
       totalLitres += flowLitres;
       Serial.print("Total litres: ");
       Serial.println(totalLitres);
+      flow.update(flowRate);
+      volume.update(totalLitres);
+      dashboard.sendUpdates();
     }
   }
 
@@ -202,16 +218,17 @@ void loop()
     digitalWrite(UVLED_PIN, HIGH);
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
+    flow.update(0);
     systemStatus.update("Idle", "idle");
     dashboard.sendUpdates();
   }
 
   // Check if water level is rising or falling
-  bool isCurrentlyRising = avgWaterLevel < prevLevel;
-  if (isCurrentlyRising != isRising && !isRising && millis() > 5000 && !isForced) //&& (millis() - flushIntervalTime) > flushInterval)
+  bool isCurrentlyRising = avgWaterLevel - 0.5 < prevLevel;
+  if (isCurrentlyRising != isRising && !isRising && millis() > 5000 && !isForced && millis() - flushTimer > flushInterval)
   {
     // Water level has changed direction
-    Serial.println("Flush beginning, opening overflow valve");
+    Serial.println("Flush beginning");
     isRising = isCurrentlyRising;
     isFlushing = true;
     digitalWrite(SANITATION_VALVE_PIN, HIGH);
@@ -222,6 +239,7 @@ void loop()
     analogWrite(PUMP_PWM, speed);
     flushStartTime = millis();
     flushIntervalTime = millis();
+    flushTimer = millis();
     systemStatus.update("Flushing", "warning");
     dashboard.sendUpdates();
   }
@@ -264,7 +282,7 @@ void loop()
       digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
       Serial.println("Sanitation valve opened");
       isSanitizing = true;
-      // digitalWrite(UVLED_PIN, LOW);
+      digitalWrite(UVLED_PIN, LOW);
       delay(10);
       digitalWrite(SANITATION_VALVE_PIN, LOW);
       delay(10);
@@ -289,16 +307,16 @@ void loop()
       delay(10);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
       delay(10);
-      // digitalWrite(UVLED_PIN, HIGH);
+      digitalWrite(UVLED_PIN, HIGH);
     }
   }
   // Check flow rate
   if (millis() - lastFlowCheckTime > 1000 && isSanitizing && !isForced)
   {
-    flowRate = ((1000 / (millis() - lastFlowCheckTime)) * flowCount) / calibrationFactor;
+    flowCount1sec = flowCount;
     flowCount = 0;
+    flowRate = ((1000.0 / (millis() - lastFlowCheckTime)) * flowCount1sec) / calibrationFactor;
     lastFlowCheckTime = millis();
-    flow.update(flowRate);
     Serial.print("Flow rate: ");
     Serial.print(flowRate);
     Serial.println(" L/min");
@@ -306,7 +324,11 @@ void loop()
     totalLitres += flowLitres;
     Serial.print("Total litres: ");
     Serial.println(totalLitres);
-    if (flowRate < minFlowRate && isSanitizing)
+    flow.update(flowRate);
+    volume.update(totalLitres);
+    dashboard.sendUpdates();
+    flag += 1;
+    if (flowRate < minFlowRate && isSanitizing && flag == 5)
     {
       Serial.println("Flow rate too low, closing sanitation valve and turning off pump and UV LED");
       systemStatus.update("Low Flow Rate!", "danger");
@@ -321,6 +343,7 @@ void loop()
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
       delay(10);
       digitalWrite(UVLED_PIN, HIGH);
+      flag = 0;
       delay(1000);
     }
   }
@@ -342,16 +365,32 @@ void loop()
     }
     else
     {
-      digitalWrite(UVLED_PIN, LOW);
-      delay(10);
-      digitalWrite(SANITATION_VALVE_PIN, LOW);
-      digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
-      delay(10);
-      digitalWrite(IN1, HIGH);
-      digitalWrite(IN2, LOW);
-      analogWrite(PUMP_PWM, speed);
-      isForced = true;
-      forceSanitize = true;
+      if (avgWaterLevel <= levelMin){
+        digitalWrite(UVLED_PIN, LOW);
+        delay(10);
+        digitalWrite(SANITATION_VALVE_PIN, LOW);
+        digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
+        delay(10);
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        analogWrite(PUMP_PWM, speed);
+        isForced = true;
+        forceSanitize = true;
+      }
+      else{
+        systemStatus.update("Low water level!", "danger");
+        dashboard.sendUpdates();
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        delay(10);
+        digitalWrite(SANITATION_VALVE_PIN, HIGH);
+        delay(10);
+        digitalWrite(UVLED_PIN, HIGH);
+        delay(5000);
+        isForced = false;
+        forceSanitize = false;
+      }
+
     }
     sanitize.update(sanitizeValue); });
   dashboard.sendUpdates();
@@ -370,6 +409,7 @@ void loop()
     }
     else
     {
+      if (avgWaterLevel <= levelMin){
       digitalWrite(OVERFLOW_VALVE_PIN, LOW);
       digitalWrite(SANITATION_VALVE_PIN, HIGH);
       delay(10);
@@ -377,6 +417,17 @@ void loop()
       digitalWrite(IN2, LOW);
       analogWrite(PUMP_PWM, speed);
       isForced = true;
+      }
+      else{
+        systemStatus.update("Low water level!", "danger");
+        dashboard.sendUpdates();
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        delay(10);
+        digitalWrite(OVERFLOW_VALVE_PIN, HIGH);
+        delay(5000);
+        isForced = false;
+      }
     }
     overflow.update(overflowValue); });
   dashboard.sendUpdates();
@@ -384,9 +435,27 @@ void loop()
   pumpSpeed.attachCallback([&](int pumpSpeedValue)
                            {
     speed = pumpSpeedValue;
-    pumpSpeed.update(pumpSpeedValue);
-    Serial.println("PUMP SPEED CHANGED");
-    Serial.println(speed); });
+    pumpSpeed.update(pumpSpeedValue); });
+
+  calibration.attachCallback([&](float calibrationValue = 13)
+                             {
+    calibrationFactor = calibrationValue;
+    calibration.update(calibrationValue); });
+
+  reset.attachCallback([&](int resetButton)
+                       {
+    if (resetButton == 0)
+    {
+      volume.update(totalLitres);
+      dashboard.sendUpdates();
+    }
+    else
+    {
+      totalLitres = 0;
+      volume.update(totalLitres);
+      dashboard.sendUpdates();
+    }
+    reset.update(resetButton); });
 
   digitalWrite(LED, HIGH);
   delay(1000);
